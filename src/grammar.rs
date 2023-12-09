@@ -1,16 +1,64 @@
 use std::fmt::{self, Debug, Formatter};
 
-pub trait ParseResult<SymbolKind> {
+/// Represents a symbol (either a token or a non-terminal) in a grammar.
+/// Symbols are generally nodes in an AST or parse tree.
+///
+/// # Example
+/// ```
+/// # use parser::grammar::Symbol;
+/// # #[derive(Clone, Copy, Debug, PartialEq)]
+/// # enum MySymbolKind { A, B, C, Node1, Node2 }
+/// enum MySymbol  {
+///     Token(MySymbolKind),
+///     Node1(String),
+///     Node2(Vec<MySymbol>),
+/// }
+///
+/// impl Symbol<MySymbolKind> for MySymbol {
+///     fn kind(&self) -> MySymbolKind {
+///         match self {
+///             MySymbol::Token(kind) => *kind,
+///             MySymbol::Node1(_) => MySymbolKind::Node1,
+///             MySymbol::Node2(_) => MySymbolKind::Node2,
+///         }
+///     }
+/// }
+pub trait Symbol<SymbolKind> {
     fn kind(&self) -> SymbolKind;
 }
 
-pub struct GrammarRule<ParseResult: self::ParseResult<SymbolKind>, SymbolKind> {
-    pub input: Vec<SymbolKind>,
-    pub reduce: fn(Vec<ParseResult>) -> ParseResult,
+impl<T: Symbol<S>, S> Symbol<S> for Box<T> {
+    fn kind(&self) -> S {
+        (**self).kind()
+    }
 }
 
-impl<ParseResult: self::ParseResult<SymbolKind>, SymbolKind: Debug> Debug
-    for GrammarRule<ParseResult, SymbolKind>
+/// A rule to reduce a sequence of input symbols to a single output symbol.
+///
+/// # Example
+/// ```
+/// # use parser::grammar::{GrammarRule, Symbol};
+/// # #[derive(Clone, Copy, Debug, PartialEq)]
+/// # enum MySymbolKind { A, B, C }
+/// # struct MySymbol (MySymbolKind);
+/// # impl Symbol<MySymbolKind> for MySymbol {
+/// #     fn kind(&self) -> MySymbolKind { self.0 }
+/// # }
+/// fn my_reduce_function(_symbols: Vec<MySymbol>) -> MySymbol {
+///     MySymbol(MySymbolKind::C)
+/// }
+/// let rule = GrammarRule {
+///    input: vec![MySymbolKind::A, MySymbolKind::B],
+///   reduce: my_reduce_function,
+/// };
+/// ```
+pub struct GrammarRule<Symbol: self::Symbol<SymbolKind>, SymbolKind> {
+    pub input: Vec<SymbolKind>,
+    pub reduce: fn(Vec<Symbol>) -> Symbol,
+}
+
+impl<Symbol: self::Symbol<SymbolKind>, SymbolKind: Debug> Debug
+    for GrammarRule<Symbol, SymbolKind>
 {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("GrammarRule")
@@ -20,35 +68,70 @@ impl<ParseResult: self::ParseResult<SymbolKind>, SymbolKind: Debug> Debug
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! append_grammar_rules {
-    ($rules_list:ident, $SymbolKind:ty, $ParseResult:ty, $result_symbol_kind:ident, $($symbol_kind:ident$(:$name:ident)?)* => $reduce:expr) => {{
-        fn reduce(symbols: Vec<$ParseResult>) -> $ParseResult {
+    ($rules_list:ident, $SymbolKind:ty, $Symbol:ty, $result_symbol_kind:ident, $($symbol_kind:ident$(:$name:ident)?)* => $reduce:expr) => {{
+        fn reduce(symbols: Vec<$Symbol>) -> $Symbol {
             let mut symbol_iterator = symbols.into_iter();
             $($(let $name =)? symbol_iterator.next().unwrap();)*
             let result = $reduce;
-            assert_eq!($crate::grammar::ParseResult::kind(&result), <$SymbolKind>::$result_symbol_kind, "Grammar rule returned wrong kind");
+            assert_eq!($crate::grammar::Symbol::kind(&result), <$SymbolKind>::$result_symbol_kind, "Grammar rule returned wrong kind");
             result
         }
-        $rules_list.push($crate::grammar::GrammarRule::<$ParseResult, $SymbolKind> {
+        $rules_list.push($crate::grammar::GrammarRule::<$Symbol, $SymbolKind> {
             input: vec![$(<$SymbolKind>::$symbol_kind),*],
             reduce,
         });
     }};
-    ($rules_list:ident, $SymbolKind:ty, $ParseResult:ty, $result_symbol_kind:ident, { $($($symbol_kind:ident$(:$name:ident)?)* => $reduce:expr),* }) => {
+    ($rules_list:ident, $SymbolKind:ty, $Symbol:ty, $result_symbol_kind:ident, { $($($symbol_kind:ident$(:$name:ident)?)* => $reduce:expr),* $(,)? }) => {
         $(
-            $crate::grammar::append_grammar_rules!($rules_list, $SymbolKind, $ParseResult, $result_symbol_kind, $($symbol_kind$(:$name)?)* => $reduce);
+            $crate::grammar::append_grammar_rules!($rules_list, $SymbolKind, $Symbol, $result_symbol_kind, $($symbol_kind$(:$name)?)* => $reduce);
         )*
     };
 }
 
+#[doc(hidden)]
 pub use append_grammar_rules;
 
+/// Defines a grammar based on a set of rules.
+/// Each rule in the grammar is defined by a sequence of input symbols and a
+/// function to reduce the input symbols to a single output symbol.
+/// 
+/// # Example
+/// ```
+/// # use parser::grammar::{Symbol, grammar};
+/// # #[derive(Clone, Debug, PartialEq)]
+/// # enum MySymbol { Token(MySymbolKind), Number(f64), Addition(Box<MySymbol>, Box<MySymbol>), Result(Box<MySymbol>) }
+/// # impl Symbol<MySymbolKind> for MySymbol {
+/// #     fn kind(&self) -> MySymbolKind {
+/// #         match self {
+/// #             MySymbol::Token(kind) => *kind,
+/// #             MySymbol::Number(_) => MySymbolKind::Number,
+/// #             MySymbol::Addition(_, _) => MySymbolKind::Addition,
+/// #             MySymbol::Result(_) => MySymbolKind::Result,
+/// #         }
+/// #     }
+/// # }
+/// grammar! {
+///     grammar MyGrammar {
+///         symbol_kind: MySymbolKind,
+///         tokens: [Plus, Semicolon, Number],
+///         symbol: Box<MySymbol>,
+///         rules: {
+///             Addition: {
+///                 Number:a Plus Number:b => Box::new(MySymbol::Addition(a, b)),
+///                 Addition:a Plus Number:b => Box::new(MySymbol::Addition(a, b)),
+///             },
+///             Result: Addition:a Semicolon => Box::new(MySymbol::Result(a)),
+///         }
+///     }
+/// }
 #[macro_export]
 macro_rules! grammar {
     ($visibility:vis grammar $Grammar:ident {
         symbol_kind: $SymbolKind:ident,
         tokens: [$($token:ident),*],
-        parse_result: $ParseResult:ident,
+        symbol: $Symbol:ty,
         rules: {$(
             $NonTerminal:ident: $({$($grouped_rule_tokens:tt)*})? $($($optional_rule_symbol_kinds:ident$(:$optional_rule_symbol_names:ident)?)* => $optional_rule_reduce:expr)?
     ),*$(,)?}
@@ -61,14 +144,14 @@ macro_rules! grammar {
 
         #[derive(Debug)]
         $visibility struct $Grammar {
-            pub rules: Vec<$crate::grammar::GrammarRule<$ParseResult, $SymbolKind>>,
+            rules: Vec<$crate::grammar::GrammarRule<$Symbol, $SymbolKind>>,
         }
 
         impl $Grammar {
             $visibility fn new() -> Self {
                 let mut rules = Vec::new();
                 $(
-                    $crate::grammar::append_grammar_rules!(rules, $SymbolKind, $ParseResult, $NonTerminal, $({$($grouped_rule_tokens)*})? $($($optional_rule_symbol_kinds$(:$optional_rule_symbol_names)?)* => $optional_rule_reduce)?);
+                    $crate::grammar::append_grammar_rules!(rules, $SymbolKind, $Symbol, $NonTerminal, $({$($grouped_rule_tokens)*})? $($($optional_rule_symbol_kinds$(:$optional_rule_symbol_names)?)* => $optional_rule_reduce)?);
                 )*
                 $Grammar { rules }
             }
@@ -84,12 +167,12 @@ mod test {
 
     #[test]
     fn append_grammar_rules_single() {
-        #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
         enum SymbolKind {
             A,
             B,
         }
-        impl ParseResult<SymbolKind> for SymbolKind {
+        impl Symbol<SymbolKind> for SymbolKind {
             fn kind(&self) -> SymbolKind {
                 *self
             }
@@ -112,7 +195,7 @@ mod test {
             B,
             C,
         }
-        impl ParseResult<SymbolKind> for SymbolKind {
+        impl Symbol<SymbolKind> for SymbolKind {
             fn kind(&self) -> SymbolKind {
                 *self
             }
@@ -133,7 +216,7 @@ mod test {
     }
 
     #[derive(Debug, PartialEq)]
-    enum TestParseResult1 {
+    enum TestSymbol1 {
         A,
         B,
         C,
@@ -146,24 +229,24 @@ mod test {
         grammar TestGrammar1 {
             symbol_kind: TestSymbolKind1,
             tokens: [A, B, C],
-            parse_result: TestParseResult1,
+            symbol: TestSymbol1,
             rules: {
-                D: {A B => TestParseResult1::D, B A => TestParseResult1::D},
-                E: {B C => TestParseResult1::E, C B => TestParseResult1::E},
-                F: A C => TestParseResult1::F,
+                D: {A B => TestSymbol1::D, B A => TestSymbol1::D},
+                E: {B C => TestSymbol1::E, C B => TestSymbol1::E},
+                F: A C => TestSymbol1::F,
             }
         }
     }
 
-    impl ParseResult<TestSymbolKind1> for TestParseResult1 {
+    impl Symbol<TestSymbolKind1> for TestSymbol1 {
         fn kind(&self) -> TestSymbolKind1 {
             match self {
-                TestParseResult1::A => TestSymbolKind1::A,
-                TestParseResult1::B => TestSymbolKind1::B,
-                TestParseResult1::C => TestSymbolKind1::C,
-                TestParseResult1::D => TestSymbolKind1::D,
-                TestParseResult1::E => TestSymbolKind1::E,
-                TestParseResult1::F => TestSymbolKind1::F,
+                TestSymbol1::A => TestSymbolKind1::A,
+                TestSymbol1::B => TestSymbolKind1::B,
+                TestSymbol1::C => TestSymbolKind1::C,
+                TestSymbol1::D => TestSymbolKind1::D,
+                TestSymbol1::E => TestSymbolKind1::E,
+                TestSymbol1::F => TestSymbolKind1::F,
             }
         }
     }
@@ -177,40 +260,40 @@ mod test {
             vec![TestSymbolKind1::A, TestSymbolKind1::B]
         );
         assert_eq!(
-            (grammar.rules[0].reduce)(vec![TestParseResult1::A, TestParseResult1::B]),
-            TestParseResult1::D
+            (grammar.rules[0].reduce)(vec![TestSymbol1::A, TestSymbol1::B]),
+            TestSymbol1::D
         );
         assert_eq!(
             grammar.rules[1].input,
             vec![TestSymbolKind1::B, TestSymbolKind1::A]
         );
         assert_eq!(
-            (grammar.rules[1].reduce)(vec![TestParseResult1::B, TestParseResult1::A]),
-            TestParseResult1::D
+            (grammar.rules[1].reduce)(vec![TestSymbol1::B, TestSymbol1::A]),
+            TestSymbol1::D
         );
         assert_eq!(
             grammar.rules[2].input,
             vec![TestSymbolKind1::B, TestSymbolKind1::C]
         );
         assert_eq!(
-            (grammar.rules[2].reduce)(vec![TestParseResult1::B, TestParseResult1::C]),
-            TestParseResult1::E
+            (grammar.rules[2].reduce)(vec![TestSymbol1::B, TestSymbol1::C]),
+            TestSymbol1::E
         );
         assert_eq!(
             grammar.rules[3].input,
             vec![TestSymbolKind1::C, TestSymbolKind1::B]
         );
         assert_eq!(
-            (grammar.rules[3].reduce)(vec![TestParseResult1::C, TestParseResult1::B]),
-            TestParseResult1::E
+            (grammar.rules[3].reduce)(vec![TestSymbol1::C, TestSymbol1::B]),
+            TestSymbol1::E
         );
         assert_eq!(
             grammar.rules[4].input,
             vec![TestSymbolKind1::A, TestSymbolKind1::C]
         );
         assert_eq!(
-            (grammar.rules[4].reduce)(vec![TestParseResult1::A, TestParseResult1::C]),
-            TestParseResult1::F
+            (grammar.rules[4].reduce)(vec![TestSymbol1::A, TestSymbol1::C]),
+            TestSymbol1::F
         );
     }
 
@@ -218,24 +301,24 @@ mod test {
         grammar TestGrammar2 {
             symbol_kind: TestSymbolKind2,
             tokens: [A],
-            parse_result: TestParseResult2,
+            symbol: TestSymbol2,
             rules: {
-                ParsedA: A:a => TestParseResult2::Parsed(a.kind()),
+                ParsedA: A:a => TestSymbol2::Parsed(a.kind()),
             }
         }
     }
 
     #[derive(Debug, PartialEq)]
-    enum TestParseResult2 {
+    enum TestSymbol2 {
         Token(TestSymbolKind2),
         Parsed(TestSymbolKind2),
     }
 
-    impl ParseResult<TestSymbolKind2> for TestParseResult2 {
+    impl Symbol<TestSymbolKind2> for TestSymbol2 {
         fn kind(&self) -> TestSymbolKind2 {
             match self {
-                TestParseResult2::Token(TestSymbolKind2::A) => TestSymbolKind2::A,
-                TestParseResult2::Parsed(TestSymbolKind2::A) => TestSymbolKind2::ParsedA,
+                TestSymbol2::Token(TestSymbolKind2::A) => TestSymbolKind2::A,
+                TestSymbol2::Parsed(TestSymbolKind2::A) => TestSymbolKind2::ParsedA,
                 _ => panic!("Unexpected parse result: {:?}", self),
             }
         }
@@ -247,8 +330,8 @@ mod test {
         assert_eq!(grammar.rules.len(), 1);
         assert_eq!(grammar.rules[0].input, vec![TestSymbolKind2::A]);
         assert_eq!(
-            (grammar.rules[0].reduce)(vec![TestParseResult2::Token(TestSymbolKind2::A)]),
-            TestParseResult2::Parsed(TestSymbolKind2::A)
+            (grammar.rules[0].reduce)(vec![TestSymbol2::Token(TestSymbolKind2::A)]),
+            TestSymbol2::Parsed(TestSymbolKind2::A)
         );
     }
 }
