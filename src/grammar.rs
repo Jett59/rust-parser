@@ -49,11 +49,13 @@ impl<T: Symbol<S>, S> Symbol<S> for Box<T> {
 /// }
 /// let rule = GrammarRule {
 ///    input: vec![MySymbolKind::A, MySymbolKind::B],
+///    result: MySymbolKind::C,
 ///   reduce: my_reduce_function,
 /// };
 /// ```
 pub struct GrammarRule<Symbol: self::Symbol<SymbolKind>, SymbolKind> {
     pub input: Vec<SymbolKind>,
+    pub result: SymbolKind,
     pub reduce: fn(Vec<Symbol>) -> Symbol,
 }
 
@@ -63,6 +65,7 @@ impl<Symbol: self::Symbol<SymbolKind>, SymbolKind: Debug> Debug
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         fmt.debug_struct("GrammarRule")
             .field("input", &self.input)
+            .field("result", &self.result)
             .finish()
     }
 }
@@ -80,6 +83,7 @@ macro_rules! append_grammar_rules {
         }
         $rules_list.push($crate::grammar::GrammarRule::<$Symbol, $SymbolKind> {
             input: vec![$(<$SymbolKind>::$symbol_kind),*],
+            result: <$SymbolKind>::$result_symbol_kind,
             reduce,
         });
     }};
@@ -136,7 +140,7 @@ macro_rules! grammar {
             $NonTerminal:ident: $({$($grouped_rule_tokens:tt)*})? $($($optional_rule_symbol_kinds:ident$(:$optional_rule_symbol_names:ident)?)* => $optional_rule_reduce:expr)?
     ),*$(,)?}
     }) => {
-        #[derive(Clone, Copy, Debug, PartialEq)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         $visibility enum $SymbolKind {
             $($token,)*
             $($NonTerminal,)*
